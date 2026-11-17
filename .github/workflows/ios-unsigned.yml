@@ -1,0 +1,83 @@
+name: Build iPhone IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cage-iphone-unsigned
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mobile/bindings/go.mod
+          cache: false
+
+      - name: Show build tool versions
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          node --version
+          go version
+
+      - name: Install interface dependencies
+        run: npm ci --prefix ui
+
+      - name: Build unsigned iPhone app
+        run: |
+          set -o pipefail
+          bash mobile/build.sh ios 2>&1 | tee ios-build.log
+
+      - name: Verify and package IPA
+        run: |
+          set -euo pipefail
+          app="mobile/.build/ios/products/Debug-iphoneos/CageMobile.app"
+          test -s "$app/Info.plist"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")
+          lipo -verify_arch arm64 "$app/$executable"
+          mkdir -p package/Payload
+          cp -R "$app" package/Payload/
+          (cd package && zip -qry ../CageMobile-unsigned.ipa Payload)
+          unzip -tq CageMobile-unsigned.ipa
+          shasum -a 256 CageMobile-unsigned.ipa > CageMobile-unsigned.ipa.sha256
+          {
+            echo "Cage iPhone build"
+            echo "Source commit: $(git rev-parse HEAD)"
+            echo "Cage version: $(cat VERSION)"
+            echo "Minimum iOS: 17"
+            echo "Signing: unsigned; sign on your own computer before installing."
+          } > build-info.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CageMobile-unsigned
+          path: |
+            CageMobile-unsigned.ipa
+            CageMobile-unsigned.ipa.sha256
+            build-info.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log if compilation failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iphone-build-log
+          path: ios-build.log
+          if-no-files-found: ignore
+          retention-days: 7
